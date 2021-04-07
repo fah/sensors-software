@@ -37,6 +37,7 @@ static constexpr ConfigShapeEntry configShape[] PROGMEM = {
 	Config_Bool(sps30_read),
 	Config_Bool(bmp_read),
 	Config_Bool(bmx280_read),
+	Config_Bool(hdc1080_read),
 	Config_Bool(ds18b20_read),
 	Config_Bool(dnms_read),
 	Config_String(dnms_correction),
