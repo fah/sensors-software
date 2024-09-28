@@ -69,7 +69,7 @@
  ************************************************************************
  * Extensions connected via I2C:                                        *
  * HTU21D (https://www.sparkfun.com/products/13763),                    *
- * BMP180, BMP280, BME280, OLED Display with SSD1306 (128x64 px)        *
+ * BMP180, BMP280, BME280, HDC1080, OLED Display with SSD1306 (128x64 px)        *
  *                                                                      *
  * Wiring Instruction                                                   *
  * (see labels on display or sensor board)                              *
@@ -105,7 +105,7 @@
  *
  ************************************************************************/
 // increment on change
-const String SOFTWARE_VERSION("NRZ-2019-124-B6");
+const String SOFTWARE_VERSION("NRZ-2021-x-x");
 
 /*****************************************************************
  * Includes                                                      *
@@ -164,6 +164,7 @@ const String SOFTWARE_VERSION("NRZ-2019-124-B6");
 #include <LiquidCrystal_I2C.h>
 #include <ArduinoJson.h>
 #include <DNSServer.h>
+#include "./HDC1080.h"
 #include "./DHT.h"
 #include <Adafruit_HTU21DF.h>
 #include <Adafruit_BMP085.h>
@@ -260,6 +261,7 @@ namespace cfg {
 	bool pms_read = PMS_READ;
 	bool hpm_read = HPM_READ;
 	bool sps30_read = SPS30_READ;
+	bool hdc1080_read = HDC1080_READ;
 	bool bmp_read = BMP_READ;
 	bool bmx280_read = BMX280_READ;
 	bool ds18b20_read = DS18B20_READ;
@@ -361,6 +363,7 @@ String basic_auth_influx;
 String basic_auth_custom;
 
 long int sample_count = 0;
+bool hdc1080_init_failed = false;
 bool bmp_init_failed = false;
 bool bmx280_init_failed = false;
 bool dnms_init_failed = false;
@@ -411,6 +414,11 @@ DHT dht(ONEWIRE_PIN, DHT_TYPE);
  * HTU21D declaration                                            *
  *****************************************************************/
 Adafruit_HTU21DF htu21d;
+
+/*****************************************************************
+ * HDC1080 declaration                                               *
+ *****************************************************************/
+HDC1080 hdc1080;
 
 /*****************************************************************
  * BMP declaration                                               *
@@ -464,6 +472,8 @@ bool is_HPM_running = true;
 unsigned long sending_time = 0;
 unsigned long last_update_attempt;
 
+float last_value_HDC1080_T = -128.0;
+float last_value_HDC1080_H = -1.0;
 float last_value_BMP_T = -128.0;
 float last_value_BMP_P = -1.0;
 float last_value_BMX280_T = -128.0;
@@ -1464,6 +1474,7 @@ static void webserver_config_send_body_get() {
 		add_form_checkbox_sensor(page_content, "ppd_read", FPSTR(INTL_PPD42NS), ppd_read);
 		add_form_checkbox_sensor(page_content, "dht_read", FPSTR(INTL_DHT22), dht_read);
 		add_form_checkbox_sensor(page_content, "htu21d_read", FPSTR(INTL_HTU21D), htu21d_read);
+		add_form_checkbox_sensor(page_content, "hdc1080_read", FPSTR(INTL_HDC1080), hdc1080_read);
 		add_form_checkbox_sensor(page_content, "bmp_read", FPSTR(INTL_BMP180), bmp_read);
 		add_form_checkbox_sensor(page_content, "bmx280_read", FPSTR(INTL_BMX280), bmx280_read);
 		add_form_checkbox_sensor(page_content, "ds18b20_read", FPSTR(INTL_DS18B20), ds18b20_read);
@@ -1900,6 +1911,12 @@ static void webserver_values() {
 			add_table_row_from_value(page_content, FPSTR(SENSORS_HTU21D), FPSTR(INTL_TEMPERATURE), check_display_value(last_value_HTU21D_T, -128, 1, 0), unit_T);
 			add_table_row_from_value(page_content, FPSTR(SENSORS_HTU21D), FPSTR(INTL_HUMIDITY), check_display_value(last_value_HTU21D_H, -1, 1, 0), unit_H);
 		}
+	
+		if (cfg::hdc1080_read) {
+			page_content += FPSTR(EMPTY_ROW);
+			add_table_row_from_value(page_content, FPSTR(SENSORS_HDC1080), FPSTR(INTL_TEMPERATURE), check_display_value(last_value_HDC1080_T, -128, 1, 0), unit_T);
+			add_table_row_from_value(page_content, FPSTR(SENSORS_HDC1080), FPSTR(INTL_HUMIDITY), check_display_value(last_value_HDC1080_H, -1, 1, 0), unit_H);
+		}
 		if (cfg::bmp_read) {
 			page_content += FPSTR(EMPTY_ROW);
 			add_table_row_from_value(page_content, FPSTR(SENSORS_BMP180), FPSTR(INTL_TEMPERATURE), check_display_value(last_value_BMP_T, -128, 1, 0), unit_T);
@@ -2264,6 +2281,7 @@ static void wifiConfig() {
 	debug_outln_info_bool(F("DHT: "), cfg::dht_read);
 	debug_outln_info_bool(F("DS18B20: "), cfg::ds18b20_read);
 	debug_outln_info_bool(F("HTU21D: "), cfg::htu21d_read);
+	debug_outln_info_bool(F("HDC1080: "), cfg::hdc1080_read);
 	debug_outln_info_bool(F("BMP: "), cfg::bmp_read);
 	debug_outln_info_bool(F("DNMS: "), cfg::dnms_read);
 	debug_outln_info(F("----\nSend to ..."));
@@ -2602,6 +2620,36 @@ static String sensorHTU21D() {
 
 	return s;
 }
+
+/*****************************************************************
+ * read HDC1080 sensor values                                     *
+ *****************************************************************/
+static String sensorHDC1080() {
+	String s;
+
+	debug_outln_verbose(FPSTR(DBG_TXT_START_READING), FPSTR(SENSORS_HDC1080));
+
+	const auto t = hdc1080.readTemperature();
+	const auto h = hdc1080.readHumidity();
+	if (isnan(t) || isnan(h)) {
+		last_value_HDC1080_T = -128.0;
+		last_value_HDC1080_H = -1.0;
+		debug_outln_error(F("HDC1080 read failed"));
+	} else {
+		debug_outln_info(FPSTR(DBG_TXT_TEMPERATURE), t);
+		debug_outln_info(FPSTR(DBG_TXT_HUMIDITY), h);
+		last_value_HDC1080_T = t;
+		last_value_HDC1080_H = h;
+		add_Value2Json(s, F("temperature"), last_value_HDC1080_T); // for now without HDC1080_temperature
+		add_Value2Json(s, F("humidity"), last_value_HDC1080_H); // for now without HDC1080_humidity
+	}
+	debug_outln_info(F("----"));
+
+	debug_outln_verbose(FPSTR(DBG_TXT_END_READING), FPSTR(SENSORS_HDC1080));
+
+	return s;
+}
+
 
 /*****************************************************************
  * read BMP180 sensor values                                     *
@@ -3580,6 +3628,11 @@ static void display_values() {
 		t_value = last_value_HTU21D_T;
 		h_value = last_value_HTU21D_H;
 	}
+	if (cfg::hdc1080_read) {
+		h_sensor = t_sensor = FPSTR(SENSORS_HDC1080);
+		t_value = last_value_HDC1080_T;
+		h_value = last_value_HDC1080_H;
+	}
 	if (cfg::bmp_read) {
 		t_sensor = h_sensor = FPSTR(SENSORS_BMP180);
 		t_value = last_value_BMP_T;
@@ -3609,7 +3662,7 @@ static void display_values() {
 	if (cfg::ppd_read || cfg::pms_read || cfg::hpm_read || cfg::sds_read) {
 		screens[screen_count++] = 1;
 	}
-	if (cfg::dht_read || cfg::ds18b20_read || cfg::htu21d_read || cfg::bmp_read || cfg::bmx280_read) {
+	if (cfg::dht_read || cfg::ds18b20_read || cfg::htu21d_read || cfg::hdc1080 || cfg::bmp_read || cfg::bmx280_read _read) {
 		screens[screen_count++] = 2;
 	}
 	if (cfg::gps_read) {
@@ -3805,6 +3858,23 @@ static void init_lcd() {
 	}
 }
 
+
+/*****************************************************************
+ * Init HDC1080                                            *
+ *****************************************************************/
+static bool initHDC1080(void) {
+	debug_outln_info(F("Trying HDC1080 sensor on 0x40"));
+
+	if (hdc1080.begin(void)) {
+		debug_outln_info(FPSTR(DBG_TXT_FOUND));
+		return true;
+	} else {
+		debug_outln_info(FPSTR(DBG_TXT_NOT_FOUND));
+		return false;
+	}
+}
+
+
 /*****************************************************************
  * Init BMP280/BME280                                            *
  *****************************************************************/
@@ -3923,7 +3993,15 @@ static void powerOnTestSensors() {
 		htu21d.begin();										// Start HTU21D
 		debug_outln_info(F("Read HTU21D..."));
 	}
-
+	
+  	if (cfg::hdc1080_read) {
+		debug_outln_info(F("Read HDC1080..."));
+		if (!initHDC1080()) {
+			debug_outln_error(F("Check HDC1080 wiring"));
+			hdc1080_init_failed = true;
+		}
+	}
+	
 	if (cfg::bmp_read) {
 		debug_outln_info(F("Read BMP..."));
 		if (!bmp.begin()) {
@@ -4255,6 +4333,10 @@ void loop(void) {
 		if (cfg::htu21d_read) {
 			result_HTU21D = sensorHTU21D();					// getting temperature and humidity (optional)
 		}
+		
+		if (cfg::hdc1080_read) {
+			result_HDC1080 = sensorHDC1080();					// getting temperature and humidity (optional)
+		}
 
 		if (cfg::bmp_read && (! bmp_init_failed)) {
 			result_BMP = sensorBMP();						// getting temperature and pressure (optional)
@@ -4329,6 +4411,10 @@ void loop(void) {
 		if (cfg::htu21d_read) {
 			data += result_HTU21D;
 			sum_send_time += sendLuftdaten(result_HTU21D, HTU21D_API_PIN, FPSTR(SENSORS_HTU21D), "HTU21D_");
+		}
+		if (cfg::hdc1080_read) {
+			data += result_HDC1080;
+			sum_send_time += sendLuftdaten(result_HDC1080, HDC1080_API_PIN, FPSTR(SENSORS_HDC1080), "HDC1080_");
 		}
 		if (cfg::bmp_read && (! bmp_init_failed)) {
 			data += result_BMP;

@@ -174,6 +174,10 @@
 #define SPS30_WAITING_AFTER_LAST_READ 11000   // waiting time after last reading mesurement data in ms
 #define SPS30_AUTO_CLEANING_INTERVAL 7200 // time in seconds
 
+// HDC1080, temperature, humidity
+#define HDC1080_READ 1
+#define HDC1080_API_PIN 7
+
 // BMP180, temperature, pressure
 #define BMP_READ 0
 #define BMP_API_PIN 3
